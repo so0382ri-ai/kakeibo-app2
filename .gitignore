@@ -1,0 +1,9 @@
+# 環境変数（秘密情報を含むためコミットしない）
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+node_modules/
+dist/
+.vite/
