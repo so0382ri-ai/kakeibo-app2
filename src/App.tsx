@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Bar, Doughnut } from 'react-chartjs-2';
-import Cropper, { type Area } from 'react-easy-crop';
-import 'react-easy-crop/react-easy-crop.css';
 import {
   ArcElement,
   BarElement,
@@ -55,7 +53,9 @@ const categoryColors: Record<Category, string> = {
 
 const yen = new Intl.NumberFormat('ja-JP');
 
-async function createCroppedImage(imageUrl: string, area: Area) {
+type CropArea = { x: number; y: number; width: number; height: number };
+
+async function createCroppedImage(imageUrl: string, area: CropArea) {
   const image = new Image();
   image.src = imageUrl;
   await image.decode();
@@ -107,15 +107,17 @@ export default function App() {
   const [filter, setFilter] = useState<Category | 'すべて'>('すべて');
   const [pendingReceipt, setPendingReceipt] = useState<ParsedReceipt | null>(null);
   const [cropImageUrl, setCropImageUrl] = useState('');
-  const [cropPosition, setCropPosition] = useState({ x: 0, y: 0 });
-  const [cropZoom, setCropZoom] = useState(1);
-  const [cropArea, setCropArea] = useState<Area | null>(null);
+  const [cropArea, setCropArea] = useState<CropArea | null>(null);
+  const [cropImageReady, setCropImageReady] = useState(false);
   const [cardCsvDraft, setCardCsvDraft] = useState<CardCsvDraft | null>(null);
   const [cardCsvMapping, setCardCsvMapping] = useState<CardCsvMapping>({ date: '', merchant: '', amount: '' });
   const [dateOverride, setDateOverride] = useState('');
   const [storeOverride, setStoreOverride] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
   const csvInput = useRef<HTMLInputElement>(null);
+  const cropStageRef = useRef<HTMLDivElement>(null);
+  const cropImageRef = useRef<HTMLImageElement>(null);
+  const cropStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => () => {
     if (cropImageUrl) URL.revokeObjectURL(cropImageUrl);
@@ -198,9 +200,8 @@ export default function App() {
 
     setNotice('');
     setCropImageUrl(URL.createObjectURL(file));
-    setCropPosition({ x: 0, y: 0 });
-    setCropZoom(1);
     setCropArea(null);
+    setCropImageReady(false);
   }
 
   async function analyzeCroppedReceipt() {
@@ -283,9 +284,70 @@ export default function App() {
     openReceiptCrop(event.dataTransfer.files[0]);
   }
 
-  const handleCropComplete = useCallback((_croppedArea: Area, croppedAreaPixels: Area) => {
-    setCropArea(croppedAreaPixels);
-  }, []);
+  function getCropPoint(event: ReactPointerEvent<HTMLDivElement>) {
+    const image = cropImageRef.current;
+    const stage = cropStageRef.current;
+    if (!image || !stage) return null;
+    const bounds = stage.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return null;
+    const scale = Math.min(bounds.width / image.naturalWidth, bounds.height / image.naturalHeight);
+    const imageWidth = image.naturalWidth * scale;
+    const imageHeight = image.naturalHeight * scale;
+    const imageLeft = bounds.left + (bounds.width - imageWidth) / 2;
+    const imageTop = bounds.top + (bounds.height - imageHeight) / 2;
+    if (event.clientX < imageLeft || event.clientX > imageLeft + imageWidth || event.clientY < imageTop || event.clientY > imageTop + imageHeight) return null;
+    return {
+      x: Math.round((event.clientX - imageLeft) / scale),
+      y: Math.round((event.clientY - imageTop) / scale),
+    };
+  }
+
+  function handleCropPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!cropImageRef.current || !cropImageReady) return;
+    const point = getCropPoint(event);
+    if (!point) return;
+    cropStartRef.current = point;
+    setCropArea({ x: point.x, y: point.y, width: 0, height: 0 });
+  }
+
+  function handleCropPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = cropStartRef.current;
+    const point = getCropPoint(event);
+    if (!start || !point) return;
+    setCropArea({
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    });
+  }
+
+  function handleCropPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!cropStartRef.current) return;
+    handleCropPointerMove(event);
+    cropStartRef.current = null;
+  }
+
+  function resetCropSelection() {
+    cropStartRef.current = null;
+    setCropArea(null);
+  }
+
+  const cropSelectionStyle = (() => {
+    const image = cropImageRef.current;
+    const stage = cropStageRef.current;
+    if (!image || !stage || !cropImageReady || !cropArea) return undefined;
+    const stageBounds = stage.getBoundingClientRect();
+    const scale = Math.min(stageBounds.width / image.naturalWidth, stageBounds.height / image.naturalHeight);
+    const imageWidth = image.naturalWidth * scale;
+    const imageHeight = image.naturalHeight * scale;
+    return {
+      left: (stageBounds.width - imageWidth) / 2 + cropArea.x * scale,
+      top: (stageBounds.height - imageHeight) / 2 + cropArea.y * scale,
+      width: cropArea.width * scale,
+      height: cropArea.height * scale,
+    };
+  })();
 
   function closeCropper() {
     setCropImageUrl('');
@@ -457,7 +519,7 @@ export default function App() {
       {isParsing && <div className="loading-toast"><LoaderCircle className="spin" size={18} /><span><strong>レシートを読み取り中</strong><small>商品と金額を確認しています…</small></span></div>}
       {notice && <div className="notice-toast" role="status"><span className="notice-check"><Check size={14} /></span>{notice}<button onClick={() => setNotice('')} aria-label="通知を閉じる"><X size={15} /></button></div>}
 
-      {cropImageUrl && <div className="modal-backdrop crop-backdrop"><section className="review-modal crop-modal" role="dialog" aria-modal="true" aria-labelledby="crop-title"><div className="modal-header"><span className="modal-icon"><FileImage size={19} /></span><button className="icon-button" onClick={closeCropper} aria-label="閉じる"><X size={18} /></button></div><span className="panel-kicker">CROP RECEIPT</span><h2 id="crop-title">必要な部分を切り抜く</h2><p className="modal-intro">品目名・金額・合計が入るように枠を調整してください。枠外の画像は解析に送信されません。</p><div className="crop-stage"><Cropper image={cropImageUrl} crop={cropPosition} zoom={cropZoom} aspect={0.72} minZoom={1} maxZoom={4} onCropChange={setCropPosition} onZoomChange={setCropZoom} onCropComplete={handleCropComplete} restrictPosition /></div><div className="crop-controls"><label htmlFor="crop-zoom">拡大・縮小</label><input id="crop-zoom" type="range" min="1" max="4" step="0.05" value={cropZoom} onChange={(event) => setCropZoom(Number(event.target.value))} /><button className="icon-button" onClick={() => { setCropPosition({ x: 0, y: 0 }); setCropZoom(1); }} aria-label="位置と倍率をリセット"><RotateCcw size={16} /></button><span>{Math.round(cropZoom * 100)}%</span></div><div className="modal-actions"><button className="outline-button" onClick={closeCropper}>キャンセル</button><button className="primary-button" onClick={() => void analyzeCroppedReceipt()} disabled={!cropArea || isParsing}><Sparkles size={16} />切り抜いて読み取る</button></div></section></div>}
+      {cropImageUrl && <div className="modal-backdrop crop-backdrop"><section className="review-modal crop-modal" role="dialog" aria-modal="true" aria-labelledby="crop-title"><div className="modal-header"><span className="modal-icon"><FileImage size={19} /></span><button className="icon-button" onClick={closeCropper} aria-label="閉じる"><X size={18} /></button></div><span className="panel-kicker">CROP RECEIPT</span><h2 id="crop-title">切り抜く範囲を指定</h2><p className="modal-intro">画像上をドラッグして、品目名・金額・総額を含む範囲を四角く囲んでください。</p><div ref={cropStageRef} className={`crop-stage ${cropImageReady ? 'crop-stage-ready' : ''}`} onPointerDown={handleCropPointerDown} onPointerMove={handleCropPointerMove} onPointerUp={handleCropPointerUp} onPointerCancel={handleCropPointerUp}><img ref={cropImageRef} className="crop-source-image" src={cropImageUrl} alt="切り抜き範囲を選ぶレシート" draggable={false} onLoad={() => setCropImageReady(true)} />{cropSelectionStyle && cropArea && cropArea.width > 0 && cropArea.height > 0 && <div className="crop-selection" style={cropSelectionStyle}><span>{cropArea.width} × {cropArea.height} px</span></div>}{cropImageReady && !cropArea && <div className="crop-hint">ここをドラッグして範囲を選択</div>}</div><div className="crop-controls"><span>{cropArea && cropArea.width > 0 && cropArea.height > 0 ? `選択範囲 ${cropArea.width} × ${cropArea.height} px` : '範囲未選択'}</span><button className="icon-button" onClick={resetCropSelection} aria-label="選択範囲をクリア" disabled={!cropArea}><RotateCcw size={16} /></button></div><div className="modal-actions"><button className="outline-button" onClick={closeCropper}>キャンセル</button><button className="primary-button" onClick={() => void analyzeCroppedReceipt()} disabled={!cropArea || cropArea.width < 8 || cropArea.height < 8 || isParsing}><Sparkles size={16} />範囲を切り抜いて読み取る</button></div></section></div>}
 
       {pendingReceipt && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPendingReceipt(null); }}><section className="review-modal" role="dialog" aria-modal="true" aria-labelledby="review-title"><div className="modal-header"><span className="modal-icon"><Sparkles size={19} /></span><button className="icon-button" onClick={() => setPendingReceipt(null)} aria-label="閉じる"><X size={18} /></button></div><span className="panel-kicker">CLAUDE RECEIPT SCAN</span><h2 id="review-title">読み取り内容を確認</h2><p className="modal-intro">保存前に店舗名と日付を確認できます。</p><div className="modal-fields"><label>お店の名前<input value={storeOverride} onChange={(event) => setStoreOverride(event.target.value)} /></label><label>お買いものした日<input type="date" value={dateOverride} onChange={(event) => setDateOverride(event.target.value)} /></label></div><div className="review-list">{pendingReceipt.items.map((item, index) => <div className="review-row" key={`${item.name}-${index}`}><span>{item.name}<small>{item.category}</small></span><strong>¥{yen.format(item.amount)}</strong></div>)}</div><div className="review-total"><span>{pendingReceipt.items.length}件の明細</span><strong>¥{yen.format(pendingReceipt.items.reduce((sum, item) => sum + item.amount, 0))}</strong></div><div className="modal-actions"><button className="outline-button" onClick={() => setPendingReceipt(null)}>キャンセル</button><button className="primary-button" onClick={saveReceipt}><Check size={16} />この内容で保存</button></div></section></div>}
 
